@@ -1,0 +1,16 @@
+{
+  "name": "tarkov-wiki-changes",
+  "version": "1.0.0",
+  "description": "Real-time activity monitor for the ten language editions of the Escape from Tarkov Fandom wiki. One line per day, change details by type, live updates (SSE), local JSON storage.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "export": "node export.js",
+    "fetch-history": "node fetch-history.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

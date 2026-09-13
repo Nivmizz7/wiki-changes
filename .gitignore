@@ -1,0 +1,12 @@
+# Generated polling store (JSON) — rebuilt continuously, NOT committed
+data/
+
+# Debug logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+
+# Node
+node_modules/
