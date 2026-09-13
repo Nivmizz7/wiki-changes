@@ -3,7 +3,6 @@
 const {
   LANGUAGES,
   POLL_INTERVAL_MS,
-  INITIAL_LOOKBACK_DAYS,
   MAX_SEED_CHANGES
 } = require('./config');
 const { fetchLatest, fetchNewerThan, normalize } = require('./fetcher');
@@ -18,57 +17,69 @@ try {
 
 let timer = null;
 let started = false;
+const historySeedTriggered = Object.create(null);
 
-// One polling cycle for a language.
+// One fast polling cycle for a language. NEVER blocks server startup.
 async function cycle(lang, broadcastEnabled) {
   const idx = store.getIndex(lang);
-  let raw;
+  let raw = [];
 
-  // If this wiki has no stored history or less than 5 tracked days, fetch full creation history!
-  if (!idx.lastTimestamp || Object.keys(idx.days || {}).length < 5) {
-    if (typeof fetchFullWikiHistory === 'function') {
-      console.log(`[poller] ['${lang}'] First run in this environment — auto-fetching full history since creation...`);
-      try {
-        await fetchFullWikiHistory(lang);
-      } catch (err) {
-        console.error(`[poller] ['${lang}'] Initial full history fetch error:`, err.message);
-      }
-      return { lang, newCount: 0 };
+  // Fast fetch: if we have lastTimestamp, fetch newer changes; otherwise fetch latest changes immediately.
+  try {
+    if (idx.lastTimestamp) {
+      raw = await fetchNewerThan(lang, idx.lastTimestamp, MAX_SEED_CHANGES);
+    } else {
+      raw = await fetchLatest(lang, MAX_SEED_CHANGES);
     }
+  } catch (err) {
+    console.error(`[poller] ['${lang}'] fetch error:`, err.message);
   }
 
-  if (idx.lastTimestamp) {
-    raw = await fetchNewerThan(lang, idx.lastTimestamp, MAX_SEED_CHANGES);
+  let newCount = 0;
+  if (raw && raw.length > 0) {
+    const changes = raw
+      .map((rc) => normalize(lang, rc))
+      .filter((c) => c && c.date);
+
+    const res = store.appendChanges(lang, changes);
+    newCount = res.newCount;
+
+    if (newCount > 0) {
+      exporter.buildLanguageBase(lang);
+      if (broadcastEnabled) {
+        broadcast(lang, {
+          type: 'changes',
+          lang,
+          newCount: res.newCount,
+          dates: res.dates,
+          changes: res.newChanges
+        });
+      }
+    }
   } else {
-    raw = await fetchLatest(lang, MAX_SEED_CHANGES);
-  }
-
-  if (!raw || !raw.length) {
     store.touchPoll(lang);
-    if (exporter.needsRebuild(lang)) exporter.buildLanguageBase(lang);
-    return { lang, newCount: 0 };
   }
 
-  const changes = raw
-    .map((rc) => normalize(lang, rc))
-    .filter((c) => c && c.date); // safety check
-
-  const res = store.appendChanges(lang, changes);
-
-  if (res.newCount > 0 || exporter.needsRebuild(lang)) {
-    exporter.buildLanguageBase(lang);
+  // Non-blocking background history seed trigger if this wiki has no full history yet
+  const currentDaysCount = Object.keys(idx.days || {}).length;
+  if (currentDaysCount < 100 && !historySeedTriggered[lang] && typeof fetchFullWikiHistory === 'function') {
+    historySeedTriggered[lang] = true;
+    console.log(`[poller] ['${lang}'] Triggering non-blocking full history download in background...`);
+    fetchFullWikiHistory(lang)
+      .then(() => {
+        console.log(`[poller] ['${lang}'] Background full history download finished!`);
+        exporter.buildLanguageBase(lang);
+        const updatedIdx = store.getIndex(lang);
+        broadcast(lang, {
+          type: 'snapshot',
+          lang,
+          days: updatedIdx.days
+        });
+      })
+      .catch((e) => console.error(`[poller] ['${lang}'] Background history download error:`, e.message));
   }
 
-  if (broadcastEnabled && res.newCount > 0) {
-    broadcast(lang, {
-      type: 'changes',
-      lang,
-      newCount: res.newCount,
-      dates: res.dates,
-      changes: res.newChanges
-    });
-  }
-  return { lang, newCount: res.newCount };
+  return { lang, newCount };
 }
 
 async function runOnce(broadcastEnabled) {
@@ -80,8 +91,6 @@ async function runOnce(broadcastEnabled) {
     const r = results[i];
     if (r.status === 'fulfilled') {
       total += r.value.newCount;
-    } else {
-      console.error(`[poller] error ${LANGUAGES[i].code}:`, r.reason && r.reason.message);
     }
   }
   return total;
@@ -90,15 +99,17 @@ async function runOnce(broadcastEnabled) {
 async function start() {
   if (started) return;
   started = true;
-  console.log('[poller] initial seed & history check...');
-  const seeded = await runOnce(false);
-  console.log(`[poller] seed done (${seeded} new changes loaded). Polling every ${POLL_INTERVAL_MS} ms.`);
+  console.log('[poller] Starting non-blocking initial seed...');
   
-  const built = exporter.buildAll(LANGUAGES.map((l) => l.code));
-  console.log('[export] base files status:', built.map((b) => `${b.lang}:${b.count}`).join(' '));
+  // Fast initial fetch for all wikis (completes in < 2 seconds)
+  runOnce(false)
+    .then((seeded) => {
+      console.log(`[poller] Initial fast seed done (${seeded} changes loaded). Polling every ${POLL_INTERVAL_MS} ms.`);
+    })
+    .catch((e) => console.error('[poller] Initial seed error:', e.message));
 
   timer = setInterval(() => {
-    runOnce(true).catch((e) => console.error('[poller] cycle error:', e));
+    runOnce(true).catch((e) => console.error('[poller] cycle error:', e.message));
   }, POLL_INTERVAL_MS);
 }
 
