@@ -1,5 +1,6 @@
-# Generated polling store (JSON) — rebuilt continuously, NOT committed
+# Generated polling store & dumps (JSON) — rebuilt continuously on server, NOT committed
 data/
+base/
 
 # Debug logs
 *.log

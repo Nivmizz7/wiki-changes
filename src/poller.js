@@ -11,27 +11,39 @@ const store = require('./store');
 const { broadcast } = require('./live');
 const exporter = require('./export');
 
+let fetchFullWikiHistory = null;
+try {
+  fetchFullWikiHistory = require('../fetch-history').fetchFullWikiHistory;
+} catch (_) {}
+
 let timer = null;
 let started = false;
 
-function lookbackISO() {
-  const d = new Date(Date.now() - INITIAL_LOOKBACK_DAYS * 86400000);
-  return d.toISOString();
-}
-
 // One polling cycle for a language.
-// broadcastEnabled = false during the initial seed (avoid spamming live clients).
 async function cycle(lang, broadcastEnabled) {
   const idx = store.getIndex(lang);
   let raw;
+
+  // If this wiki has no stored history or less than 5 tracked days, fetch full creation history!
+  if (!idx.lastTimestamp || Object.keys(idx.days || {}).length < 5) {
+    if (typeof fetchFullWikiHistory === 'function') {
+      console.log(`[poller] ['${lang}'] First run in this environment — auto-fetching full history since creation...`);
+      try {
+        await fetchFullWikiHistory(lang);
+      } catch (err) {
+        console.error(`[poller] ['${lang}'] Initial full history fetch error:`, err.message);
+      }
+      return { lang, newCount: 0 };
+    }
+  }
+
   if (idx.lastTimestamp) {
     raw = await fetchNewerThan(lang, idx.lastTimestamp, MAX_SEED_CHANGES);
   } else {
-    // First run: fetch recent history.
     raw = await fetchLatest(lang, MAX_SEED_CHANGES);
   }
 
-  if (!raw.length) {
+  if (!raw || !raw.length) {
     store.touchPoll(lang);
     if (exporter.needsRebuild(lang)) exporter.buildLanguageBase(lang);
     return { lang, newCount: 0 };
@@ -39,11 +51,12 @@ async function cycle(lang, broadcastEnabled) {
 
   const changes = raw
     .map((rc) => normalize(lang, rc))
-    .filter((c) => c && c.date); // safety: skip a change without a valid date/timestamp
+    .filter((c) => c && c.date); // safety check
+
   const res = store.appendChanges(lang, changes);
 
   if (res.newCount > 0 || exporter.needsRebuild(lang)) {
-    exporter.buildLanguageBase(lang); // keep base/<lang>.json fresh for git
+    exporter.buildLanguageBase(lang);
   }
 
   if (broadcastEnabled && res.newCount > 0) {
@@ -77,12 +90,13 @@ async function runOnce(broadcastEnabled) {
 async function start() {
   if (started) return;
   started = true;
-  console.log('[poller] initial seed (recent history)...');
+  console.log('[poller] initial seed & history check...');
   const seeded = await runOnce(false);
-  console.log(`[poller] seed done (${seeded} changes loaded). Polling every ${POLL_INTERVAL_MS} ms.`);
-  // Fresh full export of every wiki after startup (committed base dumps).
+  console.log(`[poller] seed done (${seeded} new changes loaded). Polling every ${POLL_INTERVAL_MS} ms.`);
+  
   const built = exporter.buildAll(LANGUAGES.map((l) => l.code));
-  console.log('[export] base files written:', built.map((b) => `${b.lang}:${b.count}`).join(' '));
+  console.log('[export] base files status:', built.map((b) => `${b.lang}:${b.count}`).join(' '));
+
   timer = setInterval(() => {
     runOnce(true).catch((e) => console.error('[poller] cycle error:', e));
   }, POLL_INTERVAL_MS);

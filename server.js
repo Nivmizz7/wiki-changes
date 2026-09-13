@@ -100,6 +100,19 @@ const server = http.createServer((req, res) => {
         return res.end(body);
       }
 
+      // /api/seed-history[/:lang] -> Trigger full history fetch from MediaWiki API
+      if (parts[1] === 'seed-history') {
+        const { fetchFullWikiHistory, main: fetchAll } = require('./fetch-history');
+        if (parts[2]) {
+          const lang = parts[2];
+          if (!isLang(lang)) return sendJSON(res, 404, { error: 'unknown language' });
+          fetchFullWikiHistory(lang).catch((e) => console.error('[seed-history] error:', e));
+          return sendJSON(res, 200, { ok: true, message: `Full history seed started for ${lang}` });
+        }
+        fetchAll().catch((e) => console.error('[seed-history] error:', e));
+        return sendJSON(res, 200, { ok: true, message: 'Full history seed started for all 10 wikis' });
+      }
+
       // /api/export            -> rebuild + report every base/<lang>.json
       if (parts[1] === 'export' && !parts[2]) {
         const results = exporter.buildAll(LANGUAGES.map((l) => l.code));
