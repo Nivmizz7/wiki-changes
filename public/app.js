@@ -115,6 +115,7 @@ function selectLang(lang) {
   renderTabs();
   renderDays(state.allDays[lang] || {});
   updateMeta();
+  if (search.open) syncScopeButtons();
   connectLive(lang);
 }
 
@@ -390,6 +391,246 @@ function setLive(on) {
   $('liveText').textContent = on ? 'LIVE' : 'OFFLINE';
 }
 
+/* ===== Command search (Ctrl+K) ===== */
+const search = {
+  open: false,
+  scope: 'lang', // 'lang' = current wiki tab, 'all' = all ten wikis
+  results: [],
+  active: -1,
+  timer: null,
+  ctrl: null,
+  searching: false,
+  prevFocus: null
+};
+
+function searchScope() {
+  return search.scope === 'all' ? 'all' : (state.currentLang || 'en');
+}
+
+function catColor(cat) {
+  const c = CATEGORIES.find((x) => x.key === cat);
+  return c ? c.color : '#8a8a94';
+}
+function catLabel(cat) {
+  const c = CATEGORIES.find((x) => x.key === cat);
+  return c ? c.label : cat;
+}
+
+function openSearch() {
+  if (search.open) return;
+  search.open = true;
+  search.prevFocus = document.activeElement;
+  syncScopeButtons();
+  $('searchModal').classList.remove('hidden');
+  const inp = $('searchInput');
+  inp.value = '';
+  $('searchClear').classList.add('hidden');
+  $('searchInput').setAttribute('aria-expanded', 'false');
+  search.results = [];
+  search.active = -1;
+  $('searchMeta').textContent = 'Type at least 2 characters to search.';
+  $('searchStat').textContent = '';
+  $('searchResults').innerHTML = '';
+  inp.focus();
+}
+
+function closeSearch() {
+  if (!search.open) return;
+  search.open = false;
+  if (search.ctrl) { search.ctrl.abort(); search.ctrl = null; }
+  if (search.timer) { clearTimeout(search.timer); search.timer = null; }
+  search.searching = false;
+  $('searchModal').classList.add('hidden');
+  if (search.prevFocus && search.prevFocus.focus) search.prevFocus.focus();
+}
+
+function syncScopeButtons() {
+  const code = (state.currentLang || 'en').toUpperCase();
+  $('scopeLang').textContent = code;
+  const isLang = search.scope !== 'all';
+  $('scopeLang').classList.toggle('is-active', isLang);
+  $('scopeAll').classList.toggle('is-active', !isLang);
+  $('scopeLang').setAttribute('aria-pressed', String(isLang));
+  $('scopeAll').setAttribute('aria-pressed', String(!isLang));
+}
+
+function setScope(scope) {
+  if (search.scope === scope) return;
+  search.scope = scope;
+  syncScopeButtons();
+  scheduleSearch(0);
+}
+
+// <mark>-highlight every query token (non-overlapping, longest first).
+function highlight(text, query) {
+  const src = String(text == null ? '' : text);
+  const tokens = String(query || '').toLowerCase().split(/\s+/).filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  if (!tokens.length) return escapeHtml(src);
+  const lower = src.toLowerCase();
+  const ranges = [];
+  for (const t of tokens) {
+    let i = lower.indexOf(t);
+    while (i >= 0) {
+      ranges.push([i, i + t.length]);
+      i = lower.indexOf(t, i + t.length);
+    }
+  }
+  ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const merged = [];
+  for (const r of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] < last[1]) { if (r[1] > last[1]) last[1] = r[1]; }
+    else merged.push([r[0], r[1]]);
+  }
+  let out = '';
+  let cur = 0;
+  for (const [s, e] of merged) {
+    out += escapeHtml(src.slice(cur, s)) + '<mark>' + escapeHtml(src.slice(s, e)) + '</mark>';
+    cur = e;
+  }
+  return out + escapeHtml(src.slice(cur));
+}
+
+function scheduleSearch(delay) {
+  if (search.timer) clearTimeout(search.timer);
+  search.timer = setTimeout(runSearch, delay == null ? 150 : delay);
+}
+
+async function runSearch() {
+  const q = $('searchInput').value.trim();
+  $('searchClear').classList.toggle('hidden', !q);
+  if (q.length < 2) {
+    if (search.ctrl) { search.ctrl.abort(); search.ctrl = null; }
+    search.searching = false;
+    search.results = [];
+    search.active = -1;
+    $('searchMeta').textContent = 'Type at least 2 characters to search.';
+    $('searchStat').textContent = '';
+    $('searchResults').innerHTML = '';
+    $('searchInput').setAttribute('aria-expanded', 'false');
+    return;
+  }
+  if (search.ctrl) search.ctrl.abort();
+  const ctrl = new AbortController();
+  search.ctrl = ctrl;
+  search.searching = true;
+  $('searchMeta').textContent = 'Searching…';
+  try {
+    const res = await fetch('/api/search/' + searchScope() + '?q=' + encodeURIComponent(q) + '&limit=40', { signal: ctrl.signal });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const payload = await res.json();
+    if (ctrl.signal.aborted) return;
+    renderSearchResults(payload, q);
+  } catch (err) {
+    if (ctrl.signal.aborted) return;
+    $('searchMeta').textContent = 'Search failed: ' + (err && err.message ? err.message : err);
+  } finally {
+    if (search.ctrl === ctrl) { search.ctrl = null; search.searching = false; }
+  }
+}
+
+function renderSearchResults(payload, q) {
+  const box = $('searchResults');
+  box.innerHTML = '';
+  search.results = payload.results || [];
+  const multi = search.scope === 'all';
+  let meta = search.results.length + ' result(s) · ' + payload.scannedDays + ' day(s) scanned · ' + payload.tookMs + 'ms';
+  if (payload.truncated) meta += ' · recent matches only, refine query for older history';
+  $('searchMeta').textContent = meta;
+  $('searchStat').textContent = search.scope === 'all' ? 'ALL WIKIS' : (state.currentLang || '').toUpperCase();
+  $('searchInput').setAttribute('aria-expanded', String(search.results.length > 0));
+
+  if (!search.results.length) {
+    box.innerHTML = '<div class="cmdk-empty">No matches. Try a page name, author, or a word from an edit comment.</div>';
+    search.active = -1;
+    return;
+  }
+  search.results.forEach((r, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'cmdk-item' + (i === 0 ? ' is-active' : '');
+    b.id = 'search-result-' + i;
+    b.setAttribute('role', 'option');
+    b.setAttribute('aria-selected', i === 0 ? 'true' : 'false');
+    const bytes = (r.diff === null || r.diff === undefined) ? '—' : fmtBytes(r.diff);
+    b.innerHTML =
+      (multi ? `<span class="cmdk-lang">${escapeHtml((r.lang || '').toUpperCase())}</span>` : '') +
+      `<span class="cmdk-date">${escapeHtml(r.date || '')}</span>` +
+      `<span class="type-chip" style="--c:${catColor(r.category)}">${escapeHtml(catLabel(r.category))}</span>` +
+      `<span class="cmdk-main"><span class="cmdk-title">${highlight(r.title, q)}</span>` +
+      `<span class="cmdk-sub">by ${highlight(r.user, q)}` +
+      (r.comment ? ' · ' + highlight(r.comment.slice(0, 120), q) : '') + '</span></span>' +
+      `<span class="bytes ${bytesClass(r.diff)}">${bytes}</span>`;
+    b.addEventListener('mouseenter', () => setSearchActive(i, false));
+    b.addEventListener('click', () => selectSearchResult(i));
+    box.appendChild(b);
+  });
+  search.active = 0;
+  $('searchInput').setAttribute('aria-activedescendant', 'search-result-0');
+}
+
+function setSearchActive(i, scroll) {
+  const items = document.querySelectorAll('.cmdk-item');
+  items.forEach((el, j) => {
+    el.classList.toggle('is-active', j === i);
+    el.setAttribute('aria-selected', String(j === i));
+  });
+  search.active = i;
+  $('searchInput').setAttribute('aria-activedescendant', i >= 0 ? 'search-result-' + i : '');
+  if (scroll !== false && i >= 0 && items[i] && items[i].scrollIntoView) {
+    items[i].scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function moveSearchActive(dir) {
+  if (!search.results.length) return;
+  const n = search.results.length;
+  const next = search.active < 0 ? (dir > 0 ? 0 : n - 1) : (search.active + dir + n) % n;
+  setSearchActive(next);
+}
+
+async function selectSearchResult(i) {
+  const r = search.results[i];
+  if (!r) return;
+  closeSearch();
+  // Jump to the result's wiki tab first when searching across wikis.
+  if (r.lang && r.lang !== state.currentLang) selectLang(r.lang);
+  if (r.date) {
+    try { await openDetail(r.date); }
+    catch (err) { $('days').innerHTML = '<div class="placeholder">Failed to load: ' + escapeHtml(err.message) + '</div>'; }
+  }
+}
+
+function wireSearch() {
+  $('searchBtn').addEventListener('click', openSearch);
+  $('searchClose').addEventListener('click', closeSearch);
+  $('searchModal').addEventListener('click', (e) => {
+    if (e.target === $('searchModal')) closeSearch();
+  });
+  $('scopeLang').addEventListener('click', () => setScope('lang'));
+  $('scopeAll').addEventListener('click', () => setScope('all'));
+  $('searchClear').addEventListener('click', () => {
+    $('searchInput').value = '';
+    $('searchInput').focus();
+    scheduleSearch(0);
+  });
+  $('searchInput').addEventListener('input', () => scheduleSearch(150));
+  $('searchInput').addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); moveSearchActive(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); moveSearchActive(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); selectSearchResult(search.active); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeSearch(); }
+  });
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      if (search.open) closeSearch();
+      else openSearch();
+    }
+  });
+}
+
 /* ===== Init ===== */
 function init() {
   $('days').addEventListener('click', (e) => {
@@ -401,8 +642,12 @@ function init() {
     if (e.target === $('modal')) closeDetail();
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeDetail();
+    if (e.key === 'Escape') {
+      if (search.open) closeSearch();
+      else closeDetail();
+    }
   });
+  wireSearch();
   loadLanguages().catch((err) => {
     $('days').innerHTML = '<div class="placeholder">Failed to load: ' + escapeHtml(err.message) + '</div>';
   });
