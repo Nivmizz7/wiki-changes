@@ -1,4 +1,4 @@
-# EFT-WIKI/CHANGES
+# Wiki-changes
 
 > Real-time activity monitor for the ten language editions of the **Escape from Tarkov** Fandom wiki.
 
