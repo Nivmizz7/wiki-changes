@@ -274,12 +274,29 @@ function renderDays(days) {
 }
 
 /* ===== Day detail page ===== */
-async function openDetail(date) {
+async function openDetail(date, target) {
   state.detailDate = date;
   const data = await api('/api/changes/' + state.currentLang + '/' + date);
   renderDetail(data);
   const m = $('modal');
   m.classList.remove('hidden');
+  if (target) flashEntry(target);
+}
+
+// Scroll the search-matched change into view and pulse it, so the user
+// doesn't have to re-scan a long day list visually.
+function flashEntry(target) {
+  const ts = target.timestamp || '';
+  const title = target.title || '';
+  const entries = [...document.querySelectorAll('#modalBody .entry')];
+  const hit = entries.find((el) => ts && el.dataset.ts === ts && el.dataset.title === title)
+    || entries.find((el) => ts && el.dataset.ts === ts)
+    || entries.find((el) => title && el.dataset.title === title);
+  if (!hit) return;
+  hit.scrollIntoView({ block: 'center' });
+  hit.classList.remove('flash');
+  void hit.offsetWidth; // force reflow to restart the animation
+  hit.classList.add('flash');
 }
 
 function closeDetail() {
@@ -329,6 +346,8 @@ function renderDetail(data) {
         : fmtBytes(it.diff);
       const entry = document.createElement('div');
       entry.className = 'entry';
+      entry.dataset.ts = it.timestamp || '';
+      entry.dataset.title = it.title || '';
       entry.innerHTML =
         `<span class="time">${fmtTime(it.timestamp)}</span>` +
         `<a class="author link" href="${userUrl}" target="_blank" rel="noopener" title="User:${escapeHtml(it.user)}">${escapeHtml(it.user)}</a>` +
@@ -400,7 +419,8 @@ const search = {
   timer: null,
   ctrl: null,
   searching: false,
-  prevFocus: null
+  prevFocus: null,
+  lastQuery: '' // kept across close/reopen so Ctrl+K resumes instantly
 };
 
 function searchScope() {
@@ -423,19 +443,24 @@ function openSearch() {
   syncScopeButtons();
   $('searchModal').classList.remove('hidden');
   const inp = $('searchInput');
-  inp.value = '';
-  $('searchClear').classList.add('hidden');
-  $('searchInput').setAttribute('aria-expanded', 'false');
-  search.results = [];
-  search.active = -1;
-  $('searchMeta').textContent = 'Type at least 2 characters to search.';
-  $('searchStat').textContent = '';
-  $('searchResults').innerHTML = '';
+  // Resume the previous query instead of wiping it, so a quick
+  // dismiss/reopen is instant. Re-run to refresh for the current scope.
+  inp.value = search.lastQuery || '';
+  $('searchClear').classList.toggle('hidden', !inp.value);
+  if (search.results.length && $('searchResults').children.length) {
+    scheduleSearch(0);
+  } else if (inp.value.trim().length >= 2) {
+    scheduleSearch(0);
+  } else {
+    $('searchMeta').textContent = 'Type at least 2 characters to search.';
+  }
   inp.focus();
+  inp.select();
 }
 
 function closeSearch() {
   if (!search.open) return;
+  search.lastQuery = $('searchInput').value;
   search.open = false;
   if (search.ctrl) { search.ctrl.abort(); search.ctrl = null; }
   if (search.timer) { clearTimeout(search.timer); search.timer = null; }
@@ -535,7 +560,12 @@ function renderSearchResults(payload, q) {
   box.innerHTML = '';
   search.results = payload.results || [];
   const multi = search.scope === 'all';
-  let meta = search.results.length + ' result(s) · ' + payload.scannedDays + ' day(s) scanned · ' + payload.tookMs + 'ms';
+  // "newest N days" — the scan walks newest-first under a time budget, so the
+  // count is a window into recent history, not full coverage. In ALL mode also
+  // report how many wikis were reached before the budget ran out.
+  let meta = search.results.length + ' result(s) · newest ' + payload.scannedDays + ' days';
+  if (multi) meta += ' · ' + (payload.scannedLangs || 0) + '/' + state.languages.length + ' wikis';
+  meta += ' · ' + payload.tookMs + 'ms';
   if (payload.truncated) meta += ' · recent matches only, refine query for older history';
   $('searchMeta').textContent = meta;
   $('searchStat').textContent = search.scope === 'all' ? 'ALL WIKIS' : (state.currentLang || '').toUpperCase();
@@ -597,7 +627,7 @@ async function selectSearchResult(i) {
   // Jump to the result's wiki tab first when searching across wikis.
   if (r.lang && r.lang !== state.currentLang) selectLang(r.lang);
   if (r.date) {
-    try { await openDetail(r.date); }
+    try { await openDetail(r.date, { timestamp: r.timestamp, title: r.title }); }
     catch (err) { $('days').innerHTML = '<div class="placeholder">Failed to load: ' + escapeHtml(err.message) + '</div>'; }
   }
 }
@@ -627,6 +657,25 @@ function wireSearch() {
       e.preventDefault();
       if (search.open) closeSearch();
       else openSearch();
+    }
+  });
+  // Focus trap: while the modal is open, Tab/Shift+Tab cycle through the
+  // input, scope buttons and results instead of escaping to the page behind.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab' || !search.open) return;
+    const modal = $('searchModal');
+    const focusables = [...modal.querySelectorAll('input, button, a[href]')]
+      .filter((el) => !el.disabled && el.offsetParent !== null);
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const inside = modal.contains(document.activeElement);
+    if (e.shiftKey && (!inside || document.activeElement === first)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (!inside || document.activeElement === last)) {
+      e.preventDefault();
+      first.focus();
     }
   });
 }

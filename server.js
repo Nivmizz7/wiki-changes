@@ -169,6 +169,7 @@ const server = http.createServer((req, res) => {
           query: q,
           count: found.results.length,
           scannedDays: found.scannedDays,
+          scannedLangs: found.scannedLangs,
           truncated: found.truncated,
           tookMs: found.tookMs,
           results: found.results

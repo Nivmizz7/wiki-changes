@@ -19,6 +19,28 @@ const BUDGET_MS = 350;
 const MAX_FILES_SINGLE = 365; // ~1 year back when searching one wiki
 const MAX_FILES_MULTI = 120; // per wiki when searching across wikis
 
+// Cache of sorted day keys per language. Day keys change at most once a day,
+// so a count + first/last check avoids re-sorting thousands of keys on every
+// keystroke while still picking up new days automatically.
+const dateCache = Object.create(null);
+
+function sortedDates(lang) {
+  const days = store.getDays(lang) || {};
+  const count = Object.keys(days).length;
+  const cached = dateCache[lang];
+  if (cached && cached.count === count && days[cached.first] && days[cached.last]) {
+    return cached.dates;
+  }
+  const dates = Object.keys(days).sort();
+  dateCache[lang] = {
+    count,
+    first: dates[0],
+    last: dates[dates.length - 1],
+    dates
+  };
+  return dates;
+}
+
 function tokenize(raw) {
   return String(raw || '').toLowerCase().split(/\s+/).filter(Boolean);
 }
@@ -68,7 +90,7 @@ function toResult(lang, change) {
 }
 
 // langs: array of language codes (already validated by the caller).
-// Returns { results, scannedDays, truncated, tookMs }.
+// Returns { results, scannedDays, scannedLangs, truncated, tookMs }.
 function searchChanges(langs, rawQuery, options) {
   const started = Date.now();
   const query = String(rawQuery || '').trim().toLowerCase();
@@ -85,16 +107,18 @@ function searchChanges(langs, rawQuery, options) {
 
   const candidates = []; // { rank, ts, result }
   let scannedDays = 0;
+  let scannedLangs = 0;
   let truncated = false;
 
   outer:
   for (const lang of langs) {
     let dates;
     try {
-      dates = Object.keys(store.getDays(lang) || {}).sort();
+      dates = sortedDates(lang);
     } catch (_) {
       continue;
     }
+    scannedLangs++;
     let files = 0;
     for (let i = dates.length - 1; i >= 0; i--) {
       if (Date.now() > deadline) { truncated = true; break outer; }
@@ -127,6 +151,7 @@ function searchChanges(langs, rawQuery, options) {
   return {
     results: candidates.slice(0, limit).map((c) => c.result),
     scannedDays,
+    scannedLangs,
     truncated,
     tookMs: Date.now() - started
   };

@@ -174,6 +174,10 @@ main { padding: 16px 18px 46px; max-width: 1100px; margin: 0 auto; }
 .day-row.has-data:hover { border-color: var(--accent-soft); background: #12121a; }
 .day-row.today { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
 .day-row.flash { animation: flash 0.8s steps(2, end); }
+@keyframes flash {
+  0%, 100% { background: var(--bg-2); border-color: var(--border); }
+  50% { background: rgba(255, 158, 27, 0.22); border-color: var(--accent); }
+}
 .day-row.zero-changes { opacity: 0.7; }
 .day-row.zero-changes:hover { opacity: 1; }
 
@@ -303,6 +307,7 @@ footer .fmid { color: var(--accent); }
   font-size: 12px;
 }
 .entry:hover { border-color: var(--accent-soft); }
+.entry.flash { animation: flash 0.8s steps(2, end) 2; }
 .entry .time { color: var(--faint); font-size: 11px; }
 .entry .author { color: var(--text); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .entry .author:hover { color: var(--accent); text-decoration: underline; }
@@ -472,6 +477,12 @@ footer .fmid { color: var(--accent); }
 .cmdk-item mark {
   background: rgba(255, 158, 27, 0.28);
   color: var(--accent);
+}
+/* On the active row the accent border already reads orange — darken the
+   match chip so the highlight still pops instead of blending in. */
+.cmdk-item.is-active mark {
+  background: var(--accent-soft);
+  color: #ffe2b8;
 }
 .cmdk-item .bytes { font-size: 11px; }
 .cmdk-foot {
