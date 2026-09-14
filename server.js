@@ -21,10 +21,38 @@ const MIME = {
   '.png': 'image/png'
 };
 
-function sendJSON(res, code, obj) {
-  const body = JSON.stringify(obj);
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
-  res.end(body);
+const zlib = require('zlib');
+
+function sendJSON(req, res, code, obj) {
+  const body = Buffer.from(JSON.stringify(obj));
+  const acceptEncoding = (req && req.headers && req.headers['accept-encoding']) || '';
+
+  if (acceptEncoding.includes('gzip')) {
+    zlib.gzip(body, (err, compressed) => {
+      if (err) {
+        res.writeHead(code, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Content-Length': body.length,
+          'Cache-Control': 'public, max-age=15'
+        });
+        return res.end(body);
+      }
+      res.writeHead(code, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Encoding': 'gzip',
+        'Content-Length': compressed.length,
+        'Cache-Control': 'public, max-age=15'
+      });
+      res.end(compressed);
+    });
+  } else {
+    res.writeHead(code, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': body.length,
+      'Cache-Control': 'public, max-age=15'
+    });
+    res.end(body);
+  }
 }
 
 function sendFile(res, filePath) {
@@ -65,20 +93,20 @@ const server = http.createServer((req, res) => {
     if (req.method === 'GET' && parts[0] === 'api') {
       // /api/languages
       if (parts[1] === 'languages') {
-        return sendJSON(res, 200, { languages: LANGUAGES });
+        return sendJSON(req, res, 200, { languages: LANGUAGES });
       }
 
       // /api/changes/:lang[/:date]
       if (parts[1] === 'changes' && parts[2]) {
         const lang = parts[2];
-        if (!isLang(lang)) return sendJSON(res, 404, { error: 'unknown language' });
+        if (!isLang(lang)) return sendJSON(req, res, 404, { error: 'unknown language' });
         if (parts[3]) {
           const date = parts[3];
           const day = store.getDay(lang, date);
-          return sendJSON(res, 200, { lang, date, count: day.length, changes: day });
+          return sendJSON(req, res, 200, { lang, date, count: day.length, changes: day });
         }
         const idx = store.getIndex(lang);
-        return sendJSON(res, 200, {
+        return sendJSON(req, res, 200, {
           lang,
           lastTimestamp: idx.lastTimestamp,
           lastPoll: idx.lastPoll,
@@ -90,7 +118,7 @@ const server = http.createServer((req, res) => {
       if (parts[1] === 'raw' && parts[2] && parts[3]) {
         const lang = parts[2];
         const date = parts[3];
-        if (!isLang(lang)) return sendJSON(res, 404, { error: 'unknown language' });
+        if (!isLang(lang)) return sendJSON(req, res, 404, { error: 'unknown language' });
         const day = store.getDay(lang, date);
         const body = JSON.stringify(day, null, 2);
         res.writeHead(200, {
@@ -105,23 +133,23 @@ const server = http.createServer((req, res) => {
         const { fetchFullWikiHistory, main: fetchAll } = require('./fetch-history');
         if (parts[2]) {
           const lang = parts[2];
-          if (!isLang(lang)) return sendJSON(res, 404, { error: 'unknown language' });
+          if (!isLang(lang)) return sendJSON(req, res, 404, { error: 'unknown language' });
           fetchFullWikiHistory(lang).catch((e) => console.error('[seed-history] error:', e));
-          return sendJSON(res, 200, { ok: true, message: `Full history seed started for ${lang}` });
+          return sendJSON(req, res, 200, { ok: true, message: `Full history seed started for ${lang}` });
         }
         fetchAll().catch((e) => console.error('[seed-history] error:', e));
-        return sendJSON(res, 200, { ok: true, message: 'Full history seed started for all 10 wikis' });
+        return sendJSON(req, res, 200, { ok: true, message: 'Full history seed started for all 10 wikis' });
       }
 
       // /api/export            -> rebuild + report every base/<lang>.json
       if (parts[1] === 'export' && !parts[2]) {
         const results = exporter.buildAll(LANGUAGES.map((l) => l.code));
-        return sendJSON(res, 200, { ok: true, generatedAt: new Date().toISOString(), wikis: results });
+        return sendJSON(req, res, 200, { ok: true, generatedAt: new Date().toISOString(), wikis: results });
       }
       // /api/export/:lang      -> rebuild + download one base file
       if (parts[1] === 'export' && parts[2]) {
         const lang = parts[2];
-        if (!isLang(lang)) return sendJSON(res, 404, { error: 'unknown language' });
+        if (!isLang(lang)) return sendJSON(req, res, 404, { error: 'unknown language' });
         const base = exporter.buildLanguageBase(lang) || { lang, generatedAt: null, count: 0, changes: [] };
         res.writeHead(200, {
           'Content-Type': 'application/json; charset=utf-8',
@@ -173,7 +201,7 @@ const server = http.createServer((req, res) => {
         return;
       }
 
-      return sendJSON(res, 404, { error: 'unknown endpoint' });
+      return sendJSON(req, res, 404, { error: 'unknown endpoint' });
     }
 
     // Static files (public/)
@@ -189,7 +217,7 @@ const server = http.createServer((req, res) => {
     res.end('Not found');
   } catch (e) {
     console.error('[server] error', e);
-    if (!res.headersSent) sendJSON(res, 500, { error: String(e && e.message) });
+    if (!res.headersSent) sendJSON(req, res, 500, { error: String(e && e.message) });
     else res.end();
   }
 });

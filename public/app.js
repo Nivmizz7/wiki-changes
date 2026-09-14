@@ -149,12 +149,14 @@ function monthSeq(firstYM, curYM) {
   const out = [];
   const [y0, m0] = firstYM.split('-').map(Number);
   const [y1, m1] = curYM.split('-').map(Number);
-  let y = y0, m = m0, guard = 0;
-  while (guard++ < 120) {
+  // Inclusive count of months between the two bounds (e.g. 2015-02 -> 2026-09 = 140).
+  // Previously capped at 120, which silently cut the timeline (en froze at 2025-01).
+  const total = (y1 - y0) * 12 + (m1 - m0) + 1;
+  if (total <= 0) return out;
+  for (let i = 0; i < total; i++) {
+    const y = y0 + Math.floor((m0 - 1 + i) / 12);
+    const m = ((m0 - 1 + i) % 12) + 1;
     out.push(String(y) + '-' + String(m).padStart(2, '0'));
-    if (y === y1 && m === m1) break;
-    m += 1;
-    if (m > 12) { m = 1; y += 1; }
   }
   return out;
 }
