@@ -49,7 +49,7 @@ node server.js
 ```
 
 Requires **Node.js ≥ 18** (global `fetch`). On first start the app backfills recent
-history for all ten wikis, then polls every 60 seconds.
+history for all ten wikis, then polls every 5 minutes (300 000 ms).
 ## Configuration
 
 All settings are environment variables (all optional).
@@ -57,7 +57,7 @@ All settings are environment variables (all optional).
 | Variable               | Default   | Description                                        |
 |------------------------|-----------|----------------------------------------------------|
 | `PORT`                 | `3000`    | HTTP port                                          |
-| `POLL_INTERVAL_MS`     | `60000`   | Polling interval in milliseconds                   |
+| `POLL_INTERVAL_MS`     | `300000`  | Polling interval in milliseconds (5 minutes)       |
 | `INITIAL_LOOKBACK_DAYS`| `30`      | History backfilled on first start (days)           |
 | `MAX_SEED_CHANGES`     | `4000`    | Backfill cap per wiki (entries)                    |
 | `DATA_DIR`             | `./data`  | Where JSON storage lives                            |
@@ -73,6 +73,12 @@ data/<lang>/<YYYY-MM-DD>.json   → the day's normalized changes
 ```
 
 The `data/` directory is git-ignored.
+
+> **Production tip**: mount a persistent volume on `DATA_DIR` (default `./data`,
+> i.e. `/app/data` in a typical Coolify deploy). Without it, every redeploy starts
+> from an empty store and the full history (since 2015) has to be re-fetched from
+> the MediaWiki API. The fetch is incremental (days reappear progressively), but a
+> volume keeps history instantly available across restarts.
 
 ## API
 

@@ -55,16 +55,39 @@ function sendJSON(req, res, code, obj) {
   }
 }
 
-function sendFile(res, filePath) {
-  fs.readFile(filePath, (err, data) => {
-    if (err) {
+function sendFile(req, res, filePath) {
+  fs.stat(filePath, (statErr, stat) => {
+    if (statErr) {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('Not found');
       return;
     }
     const ext = path.extname(filePath);
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
-    res.end(data);
+    const lastModified = stat.mtime.toUTCString();
+
+    // no-cache: browsers/CDN must revalidate (cheap thanks to Last-Modified/304).
+    // This prevents stale assets (e.g. app.js) being served for hours after a deploy.
+    const cacheHeaders = { 'Cache-Control': 'no-cache, must-revalidate', 'Last-Modified': lastModified };
+
+    const ims = req && req.headers && req.headers['if-modified-since'];
+    if (ims && Date.parse(ims) >= Math.floor(stat.mtimeMs) - 1000) {
+      res.writeHead(304, cacheHeaders);
+      return res.end();
+    }
+
+    fs.readFile(filePath, (err, data) => {
+      if (err) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Not found');
+        return;
+      }
+      res.writeHead(200, {
+        ...cacheHeaders,
+        'Content-Type': MIME[ext] || 'application/octet-stream',
+        'Content-Length': data.length
+      });
+      res.end(data);
+    });
   });
 }
 
@@ -86,7 +109,7 @@ const server = http.createServer((req, res) => {
   try {
     // Main page
     if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
-      return sendFile(res, path.join(PUBLIC_DIR, 'index.html'));
+      return sendFile(req, res, path.join(PUBLIC_DIR, 'index.html'));
     }
 
     // API
@@ -209,7 +232,7 @@ const server = http.createServer((req, res) => {
       const filePath = path.join(PUBLIC_DIR, pathname);
       const rel = path.relative(PUBLIC_DIR, filePath);
       if (!rel.startsWith('..') && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-        return sendFile(res, filePath);
+        return sendFile(req, res, filePath);
       }
     }
 

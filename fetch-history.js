@@ -27,11 +27,23 @@ function categoryFromLog(logtype) {
   }
 }
 
-async function fetchRevisions(lang) {
+// Fetch chunks are flushed to the store progressively so a cold-start re-seed
+// fills the timeline day by day and memory stays bounded (en ~556k revisions).
+const CHUNK_SIZE = 20000;
+
+async function fetchRevisions(lang, onChunk) {
   console.log(`[fetch-history] ['${lang}'] Fetching all page revisions since wiki creation...`);
-  const items = [];
+  let items = [];
   let arvcontinue = null;
   let page = 0;
+  let total = 0;
+
+  const flush = async () => {
+    if (!items.length) return;
+    total += items.length;
+    if (onChunk) await onChunk(items);
+    items = [];
+  };
 
   while (true) {
     page++;
@@ -93,8 +105,10 @@ async function fetchRevisions(lang) {
       }
 
       if (page % 10 === 0) {
-        console.log(`[fetch-history] ['${lang}'] Revisions progress: page ${page}, total revs: ${items.length}`);
+        console.log(`[fetch-history] ['${lang}'] Revisions progress: page ${page}, total revs: ${total + items.length}`);
       }
+
+      if (items.length >= CHUNK_SIZE) await flush();
 
       if (data.continue && data.continue.arvcontinue) {
         arvcontinue = data.continue.arvcontinue;
@@ -103,19 +117,30 @@ async function fetchRevisions(lang) {
       }
     } catch (err) {
       console.error(`[fetch-history] ['${lang}'] Error fetching revisions page ${page}:`, err.message);
+      // Save whatever has been fetched so far, then stop.
+      await flush();
       break;
     }
   }
 
-  console.log(`[fetch-history] ['${lang}'] Total revisions fetched: ${items.length}`);
-  return items;
+  await flush();
+  console.log(`[fetch-history] ['${lang}'] Total revisions fetched: ${total}`);
+  return total;
 }
 
-async function fetchLogEvents(lang) {
+async function fetchLogEvents(lang, onChunk) {
   console.log(`[fetch-history] ['${lang}'] Fetching all log events since wiki creation...`);
-  const items = [];
+  let items = [];
   let lecontinue = null;
   let page = 0;
+  let total = 0;
+
+  const flush = async () => {
+    if (!items.length) return;
+    total += items.length;
+    if (onChunk) await onChunk(items);
+    items = [];
+  };
 
   while (true) {
     page++;
@@ -171,8 +196,10 @@ async function fetchLogEvents(lang) {
       }
 
       if (page % 10 === 0) {
-        console.log(`[fetch-history] ['${lang}'] Log events progress: page ${page}, total logs: ${items.length}`);
+        console.log(`[fetch-history] ['${lang}'] Log events progress: page ${page}, total logs: ${total + items.length}`);
       }
+
+      if (items.length >= CHUNK_SIZE) await flush();
 
       if (data.continue && data.continue.lecontinue) {
         lecontinue = data.continue.lecontinue;
@@ -181,26 +208,38 @@ async function fetchLogEvents(lang) {
       }
     } catch (err) {
       console.error(`[fetch-history] ['${lang}'] Error fetching log events page ${page}:`, err.message);
+      // Save whatever has been fetched so far, then stop.
+      await flush();
       break;
     }
   }
 
-  console.log(`[fetch-history] ['${lang}'] Total log events fetched: ${items.length}`);
-  return items;
+  await flush();
+  console.log(`[fetch-history] ['${lang}'] Total log events fetched: ${total}`);
+  return total;
 }
 
 async function fetchFullWikiHistory(lang) {
-  const revs = await fetchRevisions(lang);
-  const logs = await fetchLogEvents(lang);
-  const combined = [...revs, ...logs];
+  let saved = 0;
+  const onChunk = async (chunk) => {
+    if (!chunk || !chunk.length) return;
+    try {
+      const res = store.appendChanges(lang, chunk);
+      saved += res.newCount;
+    } catch (e) {
+      console.error(`[fetch-history] ['${lang}'] Error storing chunk:`, e.message);
+    }
+  };
 
-  console.log(`[fetch-history] ['${lang}'] Saving ${combined.length} historical entries to store...`);
-  store.appendChanges(lang, combined);
+  console.log(`[fetch-history] ['${lang}'] Saving history to store incrementally...`);
+  const revs = await fetchRevisions(lang, onChunk);
+  const logs = await fetchLogEvents(lang, onChunk);
+
   store.rebuildIndex(lang);
 
   const base = exporter.buildLanguageBase(lang);
   const total = base ? base.count : 0;
-  console.log(`[fetch-history] ['${lang}'] Complete! Total entries in base/${lang}.json: ${total}`);
+  console.log(`[fetch-history] ['${lang}'] Complete! ${revs} revisions + ${logs} logs fetched, ${saved} new entries saved. Total in base/${lang}.json: ${total}`);
   return { lang, count: total };
 }
 
