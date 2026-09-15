@@ -151,6 +151,31 @@ const server = http.createServer((req, res) => {
         return res.end(body);
       }
 
+      // /api/search/:lang?q=...&limit=  (full-text search, newest first)
+      // :lang is a wiki code or "all" for all ten wikis.
+      if (parts[1] === 'search' && parts[2]) {
+        const scope = parts[2];
+        const q = (url.searchParams.get('q') || '').trim();
+        if (q.length < 2) return sendJSON(req, res, 400, { error: 'query must be at least 2 characters' });
+        const langs = scope === 'all'
+          ? LANGUAGES.map((l) => l.code)
+          : [scope];
+        if (langs.some((l) => !isLang(l))) return sendJSON(req, res, 404, { error: 'unknown language' });
+        const { searchChanges } = require('./src/search');
+        const limit = Math.min(Math.max(1, Number(url.searchParams.get('limit')) || 30), 50);
+        const found = searchChanges(langs, q, { limit });
+        return sendJSON(req, res, 200, {
+          scope,
+          query: q,
+          count: found.results.length,
+          scannedDays: found.scannedDays,
+          scannedLangs: found.scannedLangs,
+          truncated: found.truncated,
+          tookMs: found.tookMs,
+          results: found.results
+        });
+      }
+
       // /api/seed-history[/:lang] -> Trigger full history fetch from MediaWiki API
       if (parts[1] === 'seed-history') {
         const { fetchFullWikiHistory, main: fetchAll } = require('./fetch-history');

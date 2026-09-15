@@ -38,6 +38,10 @@ author, page name and byte diff. New changes stream to the open page in real tim
   page link, byte diff (`+`/`−`), minor-edit flag and edit comment.
 - **Live updates** — new changes are pushed over **SSE** (`/api/live/<lang>`); the affected
   day line flashes and any open detail view refreshes.
+- **Command search** — press **Ctrl+K** (or click SEARCH) for a fast search modal:
+  debounced as-you-type results across page names, authors and edit comments,
+  newest first, with `EN` (current tab) / `ALL` (all ten wikis) scope, keyboard
+  navigation and match highlighting. Selecting a result jumps to its day.
 - **Raw data export** — one click downloads the full day's JSON (`/api/raw/:lang/:date`).
 - **Zero dependencies** — only Node.js built-ins (`http`, `fs`); nothing to install.
 
@@ -88,6 +92,7 @@ The `data/` directory is git-ignored.
 | `GET /api/changes/<lang>`         | Calendar summary (per-day counts + byType)    |
 | `GET /api/changes/<lang>/<date>`  | Detailed changes for one day                  |
 | `GET /api/raw/<lang>/<date>`      | Download the day's raw JSON                   |
+| `GET /api/search/<lang>?q=...`    | Full-text search (pages, authors, comments); `<lang>` or `all`; `&limit=` (max 50) |
 | `GET /api/live/<lang>`            | SSE stream (real-time changes)                |
 
 ## Data model

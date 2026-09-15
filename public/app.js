@@ -115,6 +115,7 @@ function selectLang(lang) {
   renderTabs();
   renderDays(state.allDays[lang] || {});
   updateMeta();
+  if (search.open) syncScopeButtons();
   connectLive(lang);
 }
 
@@ -273,12 +274,29 @@ function renderDays(days) {
 }
 
 /* ===== Day detail page ===== */
-async function openDetail(date) {
+async function openDetail(date, target) {
   state.detailDate = date;
   const data = await api('/api/changes/' + state.currentLang + '/' + date);
   renderDetail(data);
   const m = $('modal');
   m.classList.remove('hidden');
+  if (target) flashEntry(target);
+}
+
+// Scroll the search-matched change into view and pulse it, so the user
+// doesn't have to re-scan a long day list visually.
+function flashEntry(target) {
+  const ts = target.timestamp || '';
+  const title = target.title || '';
+  const entries = [...document.querySelectorAll('#modalBody .entry')];
+  const hit = entries.find((el) => ts && el.dataset.ts === ts && el.dataset.title === title)
+    || entries.find((el) => ts && el.dataset.ts === ts)
+    || entries.find((el) => title && el.dataset.title === title);
+  if (!hit) return;
+  hit.scrollIntoView({ block: 'center' });
+  hit.classList.remove('flash');
+  void hit.offsetWidth; // force reflow to restart the animation
+  hit.classList.add('flash');
 }
 
 function closeDetail() {
@@ -328,6 +346,8 @@ function renderDetail(data) {
         : fmtBytes(it.diff);
       const entry = document.createElement('div');
       entry.className = 'entry';
+      entry.dataset.ts = it.timestamp || '';
+      entry.dataset.title = it.title || '';
       entry.innerHTML =
         `<span class="time">${fmtTime(it.timestamp)}</span>` +
         `<a class="author link" href="${userUrl}" target="_blank" rel="noopener" title="User:${escapeHtml(it.user)}">${escapeHtml(it.user)}</a>` +
@@ -390,6 +410,276 @@ function setLive(on) {
   $('liveText').textContent = on ? 'LIVE' : 'OFFLINE';
 }
 
+/* ===== Command search (Ctrl+K) ===== */
+const search = {
+  open: false,
+  scope: 'lang', // 'lang' = current wiki tab, 'all' = all ten wikis
+  results: [],
+  active: -1,
+  timer: null,
+  ctrl: null,
+  searching: false,
+  prevFocus: null,
+  lastQuery: '' // kept across close/reopen so Ctrl+K resumes instantly
+};
+
+function searchScope() {
+  return search.scope === 'all' ? 'all' : (state.currentLang || 'en');
+}
+
+function catColor(cat) {
+  const c = CATEGORIES.find((x) => x.key === cat);
+  return c ? c.color : '#8a8a94';
+}
+function catLabel(cat) {
+  const c = CATEGORIES.find((x) => x.key === cat);
+  return c ? c.label : cat;
+}
+
+function openSearch() {
+  if (search.open) return;
+  search.open = true;
+  search.prevFocus = document.activeElement;
+  syncScopeButtons();
+  $('searchModal').classList.remove('hidden');
+  const inp = $('searchInput');
+  // Resume the previous query instead of wiping it, so a quick
+  // dismiss/reopen is instant. Re-run to refresh for the current scope.
+  inp.value = search.lastQuery || '';
+  $('searchClear').classList.toggle('hidden', !inp.value);
+  if (search.results.length && $('searchResults').children.length) {
+    scheduleSearch(0);
+  } else if (inp.value.trim().length >= 2) {
+    scheduleSearch(0);
+  } else {
+    $('searchMeta').textContent = 'Type at least 2 characters to search.';
+  }
+  inp.focus();
+  inp.select();
+}
+
+function closeSearch() {
+  if (!search.open) return;
+  search.lastQuery = $('searchInput').value;
+  search.open = false;
+  if (search.ctrl) { search.ctrl.abort(); search.ctrl = null; }
+  if (search.timer) { clearTimeout(search.timer); search.timer = null; }
+  search.searching = false;
+  $('searchModal').classList.add('hidden');
+  if (search.prevFocus && search.prevFocus.focus) search.prevFocus.focus();
+}
+
+function syncScopeButtons() {
+  const code = (state.currentLang || 'en').toUpperCase();
+  $('scopeLang').textContent = code;
+  const isLang = search.scope !== 'all';
+  $('scopeLang').classList.toggle('is-active', isLang);
+  $('scopeAll').classList.toggle('is-active', !isLang);
+  $('scopeLang').setAttribute('aria-pressed', String(isLang));
+  $('scopeAll').setAttribute('aria-pressed', String(!isLang));
+}
+
+function setScope(scope) {
+  if (search.scope === scope) return;
+  search.scope = scope;
+  syncScopeButtons();
+  scheduleSearch(0);
+}
+
+// <mark>-highlight every query token (non-overlapping, longest first).
+function highlight(text, query) {
+  const src = String(text == null ? '' : text);
+  const tokens = String(query || '').toLowerCase().split(/\s+/).filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  if (!tokens.length) return escapeHtml(src);
+  const lower = src.toLowerCase();
+  const ranges = [];
+  for (const t of tokens) {
+    let i = lower.indexOf(t);
+    while (i >= 0) {
+      ranges.push([i, i + t.length]);
+      i = lower.indexOf(t, i + t.length);
+    }
+  }
+  ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const merged = [];
+  for (const r of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] < last[1]) { if (r[1] > last[1]) last[1] = r[1]; }
+    else merged.push([r[0], r[1]]);
+  }
+  let out = '';
+  let cur = 0;
+  for (const [s, e] of merged) {
+    out += escapeHtml(src.slice(cur, s)) + '<mark>' + escapeHtml(src.slice(s, e)) + '</mark>';
+    cur = e;
+  }
+  return out + escapeHtml(src.slice(cur));
+}
+
+function scheduleSearch(delay) {
+  if (search.timer) clearTimeout(search.timer);
+  search.timer = setTimeout(runSearch, delay == null ? 150 : delay);
+}
+
+async function runSearch() {
+  const q = $('searchInput').value.trim();
+  $('searchClear').classList.toggle('hidden', !q);
+  if (q.length < 2) {
+    if (search.ctrl) { search.ctrl.abort(); search.ctrl = null; }
+    search.searching = false;
+    search.results = [];
+    search.active = -1;
+    $('searchMeta').textContent = 'Type at least 2 characters to search.';
+    $('searchStat').textContent = '';
+    $('searchResults').innerHTML = '';
+    $('searchInput').setAttribute('aria-expanded', 'false');
+    return;
+  }
+  if (search.ctrl) search.ctrl.abort();
+  const ctrl = new AbortController();
+  search.ctrl = ctrl;
+  search.searching = true;
+  $('searchMeta').textContent = 'Searching…';
+  try {
+    const res = await fetch('/api/search/' + searchScope() + '?q=' + encodeURIComponent(q) + '&limit=40', { signal: ctrl.signal });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const payload = await res.json();
+    if (ctrl.signal.aborted) return;
+    renderSearchResults(payload, q);
+  } catch (err) {
+    if (ctrl.signal.aborted) return;
+    $('searchMeta').textContent = 'Search failed: ' + (err && err.message ? err.message : err);
+  } finally {
+    if (search.ctrl === ctrl) { search.ctrl = null; search.searching = false; }
+  }
+}
+
+function renderSearchResults(payload, q) {
+  const box = $('searchResults');
+  box.innerHTML = '';
+  search.results = payload.results || [];
+  const multi = search.scope === 'all';
+  // "newest N days" — the scan walks newest-first under a time budget, so the
+  // count is a window into recent history, not full coverage. In ALL mode also
+  // report how many wikis were reached before the budget ran out.
+  let meta = search.results.length + ' result(s) · newest ' + payload.scannedDays + ' days';
+  if (multi) meta += ' · ' + (payload.scannedLangs || 0) + '/' + state.languages.length + ' wikis';
+  meta += ' · ' + payload.tookMs + 'ms';
+  if (payload.truncated) meta += ' · recent matches only, refine query for older history';
+  $('searchMeta').textContent = meta;
+  $('searchStat').textContent = search.scope === 'all' ? 'ALL WIKIS' : (state.currentLang || '').toUpperCase();
+  $('searchInput').setAttribute('aria-expanded', String(search.results.length > 0));
+
+  if (!search.results.length) {
+    box.innerHTML = '<div class="cmdk-empty">No matches. Try a page name, author, or a word from an edit comment.</div>';
+    search.active = -1;
+    return;
+  }
+  search.results.forEach((r, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'cmdk-item' + (i === 0 ? ' is-active' : '');
+    b.id = 'search-result-' + i;
+    b.setAttribute('role', 'option');
+    b.setAttribute('aria-selected', i === 0 ? 'true' : 'false');
+    const bytes = (r.diff === null || r.diff === undefined) ? '—' : fmtBytes(r.diff);
+    b.innerHTML =
+      (multi ? `<span class="cmdk-lang">${escapeHtml((r.lang || '').toUpperCase())}</span>` : '') +
+      `<span class="cmdk-date">${escapeHtml(r.date || '')}</span>` +
+      `<span class="type-chip" style="--c:${catColor(r.category)}">${escapeHtml(catLabel(r.category))}</span>` +
+      `<span class="cmdk-main"><span class="cmdk-title">${highlight(r.title, q)}</span>` +
+      `<span class="cmdk-sub">by ${highlight(r.user, q)}` +
+      (r.comment ? ' · ' + highlight(r.comment.slice(0, 120), q) : '') + '</span></span>' +
+      `<span class="bytes ${bytesClass(r.diff)}">${bytes}</span>`;
+    b.addEventListener('mouseenter', () => setSearchActive(i, false));
+    b.addEventListener('click', () => selectSearchResult(i));
+    box.appendChild(b);
+  });
+  search.active = 0;
+  $('searchInput').setAttribute('aria-activedescendant', 'search-result-0');
+}
+
+function setSearchActive(i, scroll) {
+  const items = document.querySelectorAll('.cmdk-item');
+  items.forEach((el, j) => {
+    el.classList.toggle('is-active', j === i);
+    el.setAttribute('aria-selected', String(j === i));
+  });
+  search.active = i;
+  $('searchInput').setAttribute('aria-activedescendant', i >= 0 ? 'search-result-' + i : '');
+  if (scroll !== false && i >= 0 && items[i] && items[i].scrollIntoView) {
+    items[i].scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function moveSearchActive(dir) {
+  if (!search.results.length) return;
+  const n = search.results.length;
+  const next = search.active < 0 ? (dir > 0 ? 0 : n - 1) : (search.active + dir + n) % n;
+  setSearchActive(next);
+}
+
+async function selectSearchResult(i) {
+  const r = search.results[i];
+  if (!r) return;
+  closeSearch();
+  // Jump to the result's wiki tab first when searching across wikis.
+  if (r.lang && r.lang !== state.currentLang) selectLang(r.lang);
+  if (r.date) {
+    try { await openDetail(r.date, { timestamp: r.timestamp, title: r.title }); }
+    catch (err) { $('days').innerHTML = '<div class="placeholder">Failed to load: ' + escapeHtml(err.message) + '</div>'; }
+  }
+}
+
+function wireSearch() {
+  $('searchBtn').addEventListener('click', openSearch);
+  $('searchClose').addEventListener('click', closeSearch);
+  $('searchModal').addEventListener('click', (e) => {
+    if (e.target === $('searchModal')) closeSearch();
+  });
+  $('scopeLang').addEventListener('click', () => setScope('lang'));
+  $('scopeAll').addEventListener('click', () => setScope('all'));
+  $('searchClear').addEventListener('click', () => {
+    $('searchInput').value = '';
+    $('searchInput').focus();
+    scheduleSearch(0);
+  });
+  $('searchInput').addEventListener('input', () => scheduleSearch(150));
+  $('searchInput').addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); moveSearchActive(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); moveSearchActive(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); selectSearchResult(search.active); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeSearch(); }
+  });
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      if (search.open) closeSearch();
+      else openSearch();
+    }
+  });
+  // Focus trap: while the modal is open, Tab/Shift+Tab cycle through the
+  // input, scope buttons and results instead of escaping to the page behind.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab' || !search.open) return;
+    const modal = $('searchModal');
+    const focusables = [...modal.querySelectorAll('input, button, a[href]')]
+      .filter((el) => !el.disabled && el.offsetParent !== null);
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const inside = modal.contains(document.activeElement);
+    if (e.shiftKey && (!inside || document.activeElement === first)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (!inside || document.activeElement === last)) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
+}
+
 /* ===== Init ===== */
 function init() {
   $('days').addEventListener('click', (e) => {
@@ -401,8 +691,12 @@ function init() {
     if (e.target === $('modal')) closeDetail();
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeDetail();
+    if (e.key === 'Escape') {
+      if (search.open) closeSearch();
+      else closeDetail();
+    }
   });
+  wireSearch();
   loadLanguages().catch((err) => {
     $('days').innerHTML = '<div class="placeholder">Failed to load: ' + escapeHtml(err.message) + '</div>';
   });
